@@ -1776,7 +1776,16 @@ final class MetalTerminalRenderer {
                 case .perFrameAggregated:
                     needsPlacement = moved || cached.data == nil
                 }
-                if needsPlacement {
+                // A row that only moved by whole rows keeps its vertices and moves
+                // their y values (`shiftRowBuffers`), so scrolling places no row again.
+                let shifted = needsPlacement && moved && bufferingMode == .perRowPersistent
+                    && shiftRowBuffers(cached, by: Float(-CGFloat(screenRow - cached.screenRow)
+                                                         * cellHeight * scale))
+                if shifted {
+                    cached.screenRow = screenRow
+                    movedRows += 1
+                }
+                if needsPlacement && !shifted {
                     let placeInterval = Profiling.begin(.metalRowPlace)
                     defer { placeInterval.end() }
                     let rowData = placeRow(cached.prepared,
@@ -3669,6 +3678,41 @@ final class MetalTerminalRenderer {
 
     private func makeBuffer<T>(_ vertices: [T]) -> MTLBuffer? {
         return bufferPool.makeBuffer(vertices)
+    }
+
+    /// Moves a cached single-width row's vertices by `dy` pixels in place, the
+    /// shift a row takes when it scrolls by whole rows. Its vertices are placed
+    /// from its screen row, so this matches placing it again. False, and no
+    /// change, for a row that must be placed again: a double-width line or one
+    /// with image draws, whose clip and placement depend on more than the row.
+    private func shiftRowBuffers(_ entry: RowCacheEntry, by dy: Float) -> Bool {
+        guard entry.prepared.renderMode == .single, let buffers = entry.buffers,
+              buffers.belowBackgroundImageBuffers.isEmpty, buffers.underImageBuffers.isEmpty,
+              buffers.placeholderImageBuffers.isEmpty, buffers.overImageBuffers.isEmpty,
+              buffers.otherImageBuffers.isEmpty
+        else {
+            return false
+        }
+        shiftY(buffers.backgroundBuffer, count: buffers.backgroundCount, cell: ColorCell.self, by: dy)
+        shiftY(buffers.powerlineJoinBuffer, count: buffers.powerlineJoinCount,
+               cell: ColorCell.self, by: dy)
+        shiftY(buffers.glyphGrayBuffer, count: buffers.glyphGrayCount, cell: TextCell.self, by: dy)
+        shiftY(buffers.glyphColorBuffer, count: buffers.glyphColorCount, cell: TextCell.self, by: dy)
+        shiftY(buffers.decorationBuffer, count: buffers.decorationCount, cell: ColorCell.self, by: dy)
+        return true
+    }
+
+    /// Adds `dy` to the y of each cell in a buffer. Every cell type begins with
+    /// its position, two Floats, so y is the second Float of each cell.
+    private func shiftY<T>(_ buffer: MTLBuffer?, count: Int, cell: T.Type, by dy: Float) {
+        guard let buffer, count > 0 else { return }
+        let stride = MemoryLayout<T>.stride
+        let yOffset = MemoryLayout<Float>.stride
+        for index in 0..<count {
+            let y = buffer.contents().advanced(by: index * stride + yOffset)
+                .assumingMemoryBound(to: Float.self)
+            y.pointee += dy
+        }
     }
 
     private func makeStaticBuffer<T>(_ vertices: [T]) -> (MTLBuffer?, Int) {

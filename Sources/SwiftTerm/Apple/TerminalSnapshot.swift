@@ -331,6 +331,34 @@ final class TerminalSnapshot {
     ///   bidi paragraph layout is left for `completePendingBidi()`. Only pass
     ///   true from a caller that releases the terminal lock and calls it before
     ///   the frame is drawn; everyone else gets the fully resolved snapshot.
+    /// Reorders `rows` so each visible slot holds the row that already copied its
+    /// buffer line. A scroll moves every line to a new slot; keeping the row with
+    /// its line means the move copies nothing, and only rows whose line is new
+    /// (or whose slot was not claimed) are copied again.
+    private func keepRowsWithTheirLines(buffer: Buffer, visibleCount: Int) {
+        guard visibleCount > 0 else { return }
+        var byLine: [ObjectIdentifier: Row] = [:]
+        for row in rows {
+            if let identity = row.sourceIdentity {
+                byLine[identity] = row
+            }
+        }
+        var claimed = Set<ObjectIdentifier>()
+        var slots: [Row?] = Array(repeating: nil, count: visibleCount)
+        for index in 0..<visibleCount {
+            let identity = ObjectIdentifier(buffer.lines[firstRow + index].renderIdentity)
+            if let row = byLine[identity], !claimed.contains(ObjectIdentifier(row)) {
+                slots[index] = row
+                claimed.insert(ObjectIdentifier(row))
+            }
+        }
+        var spares = rows.filter { !claimed.contains(ObjectIdentifier($0)) }
+        for index in 0..<visibleCount where slots[index] == nil {
+            slots[index] = spares.popLast()
+        }
+        rows = slots.compactMap { $0 }
+    }
+
     func refresh (terminal: Terminal, viewState: FrameViewState,
                   selection: SnapshotSelectionState,
                   deferBidiTypesetting: Bool = false) -> RefreshResult {
@@ -403,6 +431,7 @@ final class TerminalSnapshot {
             rows.append(rowPool.popLast() ?? Row(source: source,
                                                   snapshotArena: snapshotArena))
         }
+        keepRowsWithTheirLines(buffer: buffer, visibleCount: visibleCount)
 
         for index in 0..<visibleCount {
             let absoluteRow = firstRow + index
