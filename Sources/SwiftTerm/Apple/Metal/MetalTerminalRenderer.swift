@@ -399,6 +399,10 @@ struct RowDrawBuffers {
     var placeholderImageBuffers: [ImageDrawBuffer]
     var overImageBuffers: [ImageDrawBuffer]
     var otherImageBuffers: [ImageDrawBuffer]
+    /// The pixels this row's cell vertices move down from where they were placed.
+    /// The cell shaders add it to each vertex, so a row that scrolls costs one
+    /// number, not a rewrite of its cells. Zero for a row placed anew.
+    var shiftY: Float = 0
 }
 
 /// A box drawing, block element or Powerline cell with its atlas entry and
@@ -3693,26 +3697,8 @@ final class MetalTerminalRenderer {
         else {
             return false
         }
-        shiftY(buffers.backgroundBuffer, count: buffers.backgroundCount, cell: ColorCell.self, by: dy)
-        shiftY(buffers.powerlineJoinBuffer, count: buffers.powerlineJoinCount,
-               cell: ColorCell.self, by: dy)
-        shiftY(buffers.glyphGrayBuffer, count: buffers.glyphGrayCount, cell: TextCell.self, by: dy)
-        shiftY(buffers.glyphColorBuffer, count: buffers.glyphColorCount, cell: TextCell.self, by: dy)
-        shiftY(buffers.decorationBuffer, count: buffers.decorationCount, cell: ColorCell.self, by: dy)
+        entry.buffers?.shiftY += dy
         return true
-    }
-
-    /// Adds `dy` to the y of each cell in a buffer. Every cell type begins with
-    /// its position, two Floats, so y is the second Float of each cell.
-    private func shiftY<T>(_ buffer: MTLBuffer?, count: Int, cell: T.Type, by dy: Float) {
-        guard let buffer, count > 0 else { return }
-        let stride = MemoryLayout<T>.stride
-        let yOffset = MemoryLayout<Float>.stride
-        for index in 0..<count {
-            let y = buffer.contents().advanced(by: index * stride + yOffset)
-                .assumingMemoryBound(to: Float.self)
-            y.pointee += dy
-        }
     }
 
     private func makeStaticBuffer<T>(_ vertices: [T]) -> (MTLBuffer?, Int) {
@@ -3809,6 +3795,8 @@ final class MetalTerminalRenderer {
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var noShift: Float = 0
+        encoder.setVertexBytes(&noShift, length: MemoryLayout<Float>.stride, index: 2)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -3907,6 +3895,8 @@ final class MetalTerminalRenderer {
                 continue
             }
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+            var shiftY = row.shiftY
+            encoder.setVertexBytes(&shiftY, length: MemoryLayout<Float>.stride, index: 2)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count * 6)
         }
     }

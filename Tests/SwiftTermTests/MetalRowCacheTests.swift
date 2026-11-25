@@ -61,6 +61,8 @@ struct MetalRowCacheTests {
         var rebuilt: Int
         var cached: Int
         var moved: Int
+        /// Each row's offset in pixels, in screen order: zero for a row placed anew.
+        var shifts: [Float]
     }
 
     /// A view drawn by one renderer into an off-screen layer, never a window.
@@ -120,7 +122,8 @@ struct MetalRowCacheTests {
             }
             let counts = renderer.debugRowCacheCounts
             return DrawnFrame(rows: rows, pixels: pixels,
-                              rebuilt: counts.rebuilt, cached: counts.cached, moved: counts.moved)
+                              rebuilt: counts.rebuilt, cached: counts.cached, moved: counts.moved,
+                              shifts: drawData.rows.map(\.shiftY))
         }
 
         /// Renders the same terminal state again with every row built from
@@ -157,13 +160,31 @@ struct MetalRowCacheTests {
             }
         }
 
+        /// Appends a cell buffer as the GPU reads it: each cell's y moved by the
+        /// row's shift, which the shader adds to every vertex. A cell's position
+        /// is its first two floats, so y is the second.
+        private static func appendShifted(_ buffer: MTLBuffer?, count: Int, stride: Int,
+                                          shift: Float, to out: inout [UInt8]) {
+            withUnsafeBytes(of: UInt32(count)) { out.append(contentsOf: $0) }
+            guard let buffer, count > 0 else { return }
+            var bytes = [UInt8](UnsafeRawBufferPointer(start: buffer.contents(), count: count * stride))
+            for cell in 0..<count {
+                let offset = cell * stride + MemoryLayout<Float>.stride
+                let y = bytes.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) } + shift
+                withUnsafeBytes(of: y) { raw in
+                    for index in 0..<raw.count { bytes[offset + index] = raw[index] }
+                }
+            }
+            out.append(contentsOf: bytes)
+        }
+
         static func bytes(_ row: RowDrawBuffers) -> [UInt8] {
             var out: [UInt8] = []
-            append(row.backgroundBuffer, count: row.backgroundCount, stride: MemoryLayout<ColorCell>.stride, to: &out)
-            append(row.powerlineJoinBuffer, count: row.powerlineJoinCount, stride: MemoryLayout<ColorCell>.stride, to: &out)
-            append(row.glyphGrayBuffer, count: row.glyphGrayCount, stride: MemoryLayout<TextCell>.stride, to: &out)
-            append(row.glyphColorBuffer, count: row.glyphColorCount, stride: MemoryLayout<TextCell>.stride, to: &out)
-            append(row.decorationBuffer, count: row.decorationCount, stride: MemoryLayout<ColorCell>.stride, to: &out)
+            appendShifted(row.backgroundBuffer, count: row.backgroundCount, stride: MemoryLayout<ColorCell>.stride, shift: row.shiftY, to: &out)
+            appendShifted(row.powerlineJoinBuffer, count: row.powerlineJoinCount, stride: MemoryLayout<ColorCell>.stride, shift: row.shiftY, to: &out)
+            appendShifted(row.glyphGrayBuffer, count: row.glyphGrayCount, stride: MemoryLayout<TextCell>.stride, shift: row.shiftY, to: &out)
+            appendShifted(row.glyphColorBuffer, count: row.glyphColorCount, stride: MemoryLayout<TextCell>.stride, shift: row.shiftY, to: &out)
+            appendShifted(row.decorationBuffer, count: row.decorationCount, stride: MemoryLayout<ColorCell>.stride, shift: row.shiftY, to: &out)
             append(row.belowBackgroundImageBuffers, to: &out)
             append(row.underImageBuffers, to: &out)
             append(row.placeholderImageBuffers, to: &out)
@@ -282,6 +303,8 @@ struct MetalRowCacheTests {
         let up = try #require(await harness.frame())
         #expect(up.rebuilt == 3)
         #expect(up.moved == rows - 3)
+        #expect(up.shifts.filter { $0 != 0 }.count == rows - 3, "every moved row carries its shift")
+        #expect(up.shifts.filter { $0 == 0 }.count == 3, "a row placed anew carries no shift")
         await expectParity(harness, with: up)
 
         harness.view.scrollDown(lines: 3)
