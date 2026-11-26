@@ -16,10 +16,13 @@
 import AppKit
 import Foundation
 
-/// The visible screen as plain text, one line per row, with the map from a
-/// row's columns to the text's UTF-16 offsets that accessibility ranges use.
+/// The visible screen as plain text, with the map from a row's columns to the
+/// text's UTF-16 offsets that accessibility ranges use. Rows end with a
+/// newline, except a row the next one continues (a soft wrap): those are
+/// joined, as a copy of a selection over them joins them, so the selected
+/// text and its range in the value agree.
 struct AccessibleScreenText {
-    /// The rows joined with a newline after every row but the last.
+    /// The rows, a newline after every row but the last and a wrapped one.
     let text: NSString
     /// The UTF-16 offset of each row's first character in `text`.
     let lineStarts: [Int]
@@ -40,13 +43,19 @@ struct AccessibleScreenText {
         let buffer = terminal.displayBuffer
         let cols = terminal.cols
         let top = buffer.yDisp
+        // The cursor's row keeps its blank cells up to the cursor, so the
+        // insertion point lands on its column, not after the row's text.
+        let cursorRow = buffer.yBase + buffer.y - top
+        let cursorCol = min(buffer.x, cols)
         var text = ""
         var lineStarts: [Int] = []
         var lineLengths: [Int] = []
         var columnOffsets: [[Int]] = []
         var offset = 0
         for row in 0..<terminal.rows {
-            if row > 0 {
+            let lineIndex = top + row
+            let isLine = lineIndex >= 0 && lineIndex < buffer.lines.count
+            if row > 0, !(isLine && buffer.lines[lineIndex].isWrapped) {
                 text += "\n"
                 offset += 1
             }
@@ -54,11 +63,17 @@ struct AccessibleScreenText {
             var offsets = [Int](repeating: 0, count: cols + 1)
             var rowText = ""
             var rowLength = 0
-            let lineIndex = top + row
             var col = 0
-            if lineIndex >= 0, lineIndex < buffer.lines.count {
+            if isLine {
                 let line = buffer.lines[lineIndex]
-                let limit = min(line.getTrimmedLength(), line.count, cols)
+                // A row the next one continues keeps its trailing blanks:
+                // they are part of the wrapped line's text.
+                let nextIndex = lineIndex + 1
+                let wraps = row + 1 < terminal.rows && nextIndex < buffer.lines.count
+                    && buffer.lines[nextIndex].isWrapped
+                var limit = wraps ? line.count : line.getTrimmedLength()
+                if row == cursorRow { limit = max(limit, cursorCol) }
+                limit = min(limit, line.count, cols)
                 while col < limit {
                     let cell = line.packedView(at: col)
                     let width = max(1, Int(cell.width))
@@ -130,9 +145,10 @@ struct AccessibleScreenText {
 
     /// The range clamped to the text.
     func clamp(_ range: NSRange) -> NSRange {
+        // Computed without adding location and length: a client may pass
+        // NSNotFound with a length, whose sum overflows.
         let location = max(0, min(range.location, length))
-        let end = max(location, min(range.location + max(0, range.length), length))
-        return NSRange(location: location, length: end - location)
+        return NSRange(location: location, length: max(0, min(range.length, length - location)))
     }
 }
 

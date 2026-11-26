@@ -65,7 +65,9 @@ struct MacAccessibilityTests {
         view.feed(text: "abcdefghijKLMNO")
         select(view, from: Position(col: 0, row: 0), to: Position(col: 5, row: 1))
         #expect(view.accessibilitySelectedText() == "abcdefghijKLMNO")
-        #expect(view.accessibilitySelectedTextRange() == NSRange(location: 0, length: 16))
+        #expect(view.accessibilitySelectedTextRange() == NSRange(location: 0, length: 15))
+        let range = view.accessibilitySelectedTextRange()
+        #expect(view.accessibilityString(for: range) == view.accessibilitySelectedText())
     }
 
     @Test func wideCharactersMapToTheirColumns() {
@@ -91,6 +93,22 @@ struct MacAccessibilityTests {
         defer { pasteboard.releaseGlobally() }
         #expect(view.writeSelection(to: pasteboard, types: [.string]))
         #expect(pasteboard.string(forType: .string) == "hello")
+    }
+
+    @Test func theInsertionPointIsAtTheCursorPastBlankCells() {
+        let (view, window) = makeView()
+        _ = window
+        view.feed(text: "ab\u{1b}[1;8H")
+        #expect(view.accessibilitySelectedTextRange() == NSRange(location: 7, length: 0))
+    }
+
+    @Test func anOverflowingRangeIsClampedNotTrapped() {
+        let (view, window) = makeView()
+        _ = window
+        view.feed(text: "hello")
+        let range = NSRange(location: NSNotFound, length: 5)
+        #expect(view.accessibilityString(for: range) == "")
+        _ = view.accessibilityFrame(for: range)
     }
 
     @Test func frameOfARangeCoversItsCells() {
