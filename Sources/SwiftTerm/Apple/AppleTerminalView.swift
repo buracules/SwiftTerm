@@ -4258,6 +4258,10 @@ extension TerminalView {
         public var metricsEntryLimitResets: Int = 0
         public var metricsFontLimitResets: Int = 0
         public var metalRowsRebuilt: Int = 0
+        /// Rows whose buffers were reused as they were, per the row cache.
+        public var metalRowsCached: Int = 0
+        /// Reused rows that moved by whole rows and were shifted in place.
+        public var metalRowsMoved: Int = 0
         public var atlasInvalidationBuildAttempts: Int = 0
 
         /// Mean bytes per `feed` call, or zero when nothing was fed.
@@ -4314,6 +4318,8 @@ extension TerminalView {
             result.metricsEntryLimitResets = counters.metricsEntryLimitResets
             result.metricsFontLimitResets = counters.metricsFontLimitResets
             result.metalRowsRebuilt = counters.rowsRebuilt
+            result.metalRowsCached = counters.rowsCached
+            result.metalRowsMoved = counters.rowsMoved
             result.atlasInvalidationBuildAttempts = counters.atlasInvalidationBuildAttempts
         }
 #endif

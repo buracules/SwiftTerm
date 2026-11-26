@@ -698,6 +698,8 @@ struct MetalProfileCounters {
     var metricsEntryLimitResets = 0
     var metricsFontLimitResets = 0
     var rowsRebuilt = 0
+    var rowsCached = 0
+    var rowsMoved = 0
     var atlasInvalidationBuildAttempts = 0
 
     mutating func add(_ other: MetalProfileCounters) {
@@ -738,6 +740,8 @@ struct MetalProfileCounters {
         metricsEntryLimitResets += other.metricsEntryLimitResets
         metricsFontLimitResets += other.metricsFontLimitResets
         rowsRebuilt += other.rowsRebuilt
+        rowsCached += other.rowsCached
+        rowsMoved += other.rowsMoved
         atlasInvalidationBuildAttempts += other.atlasInvalidationBuildAttempts
     }
 }
@@ -1875,6 +1879,8 @@ final class MetalTerminalRenderer {
 #endif
         if ProfilingStats.enabled {
             activeProfileCounters.rowsRebuilt += rebuiltRows
+            activeProfileCounters.rowsCached += cachedRows
+            activeProfileCounters.rowsMoved += movedRows
         }
 
         let cursorData = buildCursorDrawData(snapshot: snapshot,
