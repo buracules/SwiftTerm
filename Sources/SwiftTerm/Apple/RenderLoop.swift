@@ -36,9 +36,13 @@ struct RenderLoopCounters: Sendable {
 /// frame, so a flood cannot queue work faster than it can be drawn.
 final class RenderLoop: Sendable {
     /// Renders one frame. Called on the render thread, never re-entrantly, and
-    /// always with `frameLock` held.
-    ///
-    private let onRender: @Sendable () -> Void
+    /// always with `frameLock` held. Returns true when the frame was skipped
+    /// because a resource was busy: the loop then asks again after a short
+    /// delay, so a skipped frame is not lost.
+    private let onRender: @Sendable () -> Bool
+
+    /// How long a busy frame waits before the loop asks again.
+    private static let busyRetryDelay: TimeInterval = 0.002
 
     /// Serialises a frame against structural changes made on the main thread:
     /// enabling or disabling Metal, rebinding the surface after a display
@@ -58,7 +62,7 @@ final class RenderLoop: Sendable {
     }
     private let control = Locked(ControlState())
 
-    init (onRender: @escaping @Sendable () -> Void) {
+    init (onRender: @escaping @Sendable () -> Bool) {
         self.onRender = onRender
     }
 
@@ -95,6 +99,11 @@ final class RenderLoop: Sendable {
 
     /// Asks for one frame. Safe from any thread, including the render thread.
     func signal () {
+        Self.wake(control: control, semaphore: semaphore)
+    }
+
+    /// Marks a frame pending and posts the semaphore, counting the signal.
+    private static func wake (control: Locked<ControlState>, semaphore: DispatchSemaphore) {
         let shouldWake = control.withLock { state in
             state.counters.signals += 1
             guard !state.stopped else { return false }
@@ -154,7 +163,7 @@ final class RenderLoop: Sendable {
         control: Locked<ControlState>,
         semaphore: DispatchSemaphore,
         frameLock: NSLock,
-        onRender: @Sendable () -> Void
+        onRender: @Sendable () -> Bool
     ) {
         while true {
             semaphore.wait()
@@ -175,10 +184,17 @@ final class RenderLoop: Sendable {
                 frameLock.unlock()
                 return
             }
-            autoreleasepool {
+            let busy = autoreleasepool {
                 onRender()
             }
             frameLock.unlock()
+            if busy {
+                DispatchQueue.global(qos: .userInteractive).asyncAfter(
+                    deadline: .now() + Self.busyRetryDelay
+                ) {
+                    Self.wake(control: control, semaphore: semaphore)
+                }
+            }
         }
     }
 }

@@ -449,8 +449,11 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             self?.applyFrameSideEffects(effects)
         }
         let loop = RenderLoop {
-            guard let effects = owner.renderPublishedFrame() else { return }
-            Task { @MainActor in applyEffects(effects) }
+            let result = owner.renderPublishedFrame()
+            if let effects = result.effects {
+                Task { @MainActor in applyEffects(effects) }
+            }
+            return result.busy
         }
         viewStateLock.lock()
         renderLoopStorage = loop

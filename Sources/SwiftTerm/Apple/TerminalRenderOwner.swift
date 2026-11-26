@@ -93,6 +93,24 @@ final class TerminalRenderMailbox: Sendable {
             return request
         }
     }
+
+    /// Puts back a request the render thread could not run. A size or
+    /// accessibility change published since the take is kept, so nothing is lost.
+    fileprivate func restore(_ request: FramePreparationRequest) {
+        state.withLock { state in
+            if state.pendingSize == nil {
+                state.pendingSize = request.pendingSize
+            }
+            if !request.notifyAccessibility {
+                state.suppressAccessibility = true
+            }
+#if os(macOS)
+            if request.updateScroller {
+                state.updateScroller = true
+            }
+#endif
+        }
+    }
 }
 
 /// A copied inspection value used by tests and diagnostics.
@@ -124,6 +142,8 @@ private final class TerminalRenderSession {
 /// State used only by the render domain. Parser and value APIs never take this
 /// lock.
 private struct TerminalRenderState {
+    /// Frames in a row that found the terminal lock busy, reset by a drawn frame.
+    var busyFrames = 0
 #if canImport(MetalKit)
     var renderer: MetalTerminalRenderer?
     var needsExternalDraw = false
@@ -492,27 +512,44 @@ final class TerminalRenderOwner: Sendable {
 
     /// Prepares and draws one detached-surface frame. Only the checked main
     /// effects value leaves the render owner.
-    func renderPublishedFrame () -> MainFrameEffects? {
-        guard let request = mailbox.takeRequest() else { return nil }
-        guard let prepared = prepareFrame(request) else { return nil }
+    ///
+    /// The render thread does not wait for a parse that holds the terminal
+    /// lock: it skips the frame and says so (`busy`), and the caller asks for
+    /// it again shortly. After `busyFramesBeforeWait` skips in a row it waits,
+    /// so a flood of output cannot hold off every frame.
+    func renderPublishedFrame () -> (effects: MainFrameEffects?, busy: Bool) {
+        guard let request = mailbox.takeRequest() else { return (nil, false) }
+        let mayWait = withRenderState { $0.busyFrames >= Self.busyFramesBeforeWait }
+        let attempt = prepareFrame(request, mayWait: mayWait)
+        guard !attempt.busy else {
+            mailbox.restore(request)
+            withRenderState { $0.busyFrames += 1 }
+            return (nil, true)
+        }
+        withRenderState { $0.busyFrames = 0 }
+        guard let prepared = attempt.update else { return (nil, false) }
 #if canImport(MetalKit)
         if prepared.needsMetalDisplay && metalNeedsExternalDraw {
             renderMetal()
         }
 #endif
-        return prepared.mainEffects
+        return (prepared.mainEffects, false)
     }
+
+    /// Skips at most this many frames in a row while the lock is busy.
+    private static let busyFramesBeforeWait = 3
 
     @MainActor
     func prepareFrame (viewState: FrameViewState) -> TerminalView.PreparedFrame? {
         guard let request = mailbox.takeRequest(viewState: viewState) else { return nil }
-        return prepareFrame(request)
+        return prepareFrame(request, mayWait: true).update
     }
 
-    private func prepareFrame (_ request: FramePreparationRequest)
-        -> TerminalView.PreparedFrame?
+    private func prepareFrame (_ request: FramePreparationRequest, mayWait: Bool)
+        -> (update: TerminalView.PreparedFrame?, busy: Bool)
     {
-        withRenderState { renderState in
+        var busy = false
+        let rendered = withRenderState { renderState in
         guard let session = currentSession() else { return nil }
         let terminal = session.terminal
 #if canImport(MetalKit)
@@ -522,7 +559,7 @@ final class TerminalRenderOwner: Sendable {
         let metalActive = false
 #endif
 
-        var update: TerminalView.PreparedFrame? = terminal.terminalLock.withLock {
+        let outcome: TerminalView.PreparedFrame?? = withFrameLock(terminal, mayWait: mayWait) {
             let resizedTo = applyPendingSize(
                 request.pendingSize,
                 cellPixelWidth: request.viewState.cellPixelWidth,
@@ -655,6 +692,11 @@ final class TerminalRenderOwner: Sendable {
 #endif
             return result
         }
+        guard let lockedUpdate = outcome else {
+            busy = true
+            return nil
+        }
+        var update: TerminalView.PreparedFrame? = lockedUpdate
 
         guard update != nil else { return nil }
         session.snapshot.completePendingBidi()
@@ -667,6 +709,19 @@ final class TerminalRenderOwner: Sendable {
 #endif
         return update
         }
+        return (rendered, busy)
+    }
+
+    /// Runs one frame's terminal work under the terminal lock. With
+    /// `mayWait` false the render thread takes the lock only when nothing
+    /// holds or waits for it; a nil result then means the frame is busy.
+    private func withFrameLock<T>(
+        _ terminal: Terminal, mayWait: Bool, _ body: () -> T
+    ) -> T? {
+        if mayWait {
+            return terminal.terminalLock.withLock(body)
+        }
+        return terminal.terminalLock.withLockIfFree(body)
     }
 
     private func applyPendingSize (

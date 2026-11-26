@@ -113,6 +113,39 @@ public final class TerminalLock: @unchecked Sendable {
         return try body()
     }
 
+    /// Takes the lock only when no thread holds it or waits for it, and
+    /// returns false otherwise without queuing a ticket. A ticket taken and
+    /// then abandoned would stall every later waiter, so a failed attempt
+    /// leaves the line exactly as it found it.
+    public func tryLock () -> Bool
+    {
+        let current = currentOwner
+        let profilingOwner = Profiling.enabled ? ProfilingOwner.current : .other
+
+        condition.lock()
+        precondition(owner != current, "TerminalLock is non-recursive")
+        guard nextTicket == nowServing else {
+            condition.unlock()
+            return false
+        }
+        nextTicket &+= 1
+        owner = current
+        if Profiling.enabled {
+            holdInterval = Profiling.begin(.lockHold, owner: profilingOwner)
+        }
+        condition.unlock()
+        return true
+    }
+
+    /// Runs `body` under the lock when ``tryLock()`` takes it, and returns nil
+    /// without running it otherwise.
+    public func withLockIfFree<T> (_ body: () throws -> T) rethrows -> T?
+    {
+        guard tryLock() else { return nil }
+        defer { unlock() }
+        return try body()
+    }
+
     public func preconditionLocked (file: StaticString = #fileID, line: UInt = #line)
     {
         precondition(isLockedByCurrentThread, "TerminalLock must be held", file: file, line: line)
