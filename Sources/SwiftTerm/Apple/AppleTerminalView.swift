@@ -4025,8 +4025,10 @@ extension TerminalView {
             UIAccessibility.post(notification: .layoutChanged, argument: nil)
 #endif
 #if os(macOS)
-            NSAccessibility.post(element: self, notification: .valueChanged)
-            NSAccessibility.post(element: self, notification: .selectedTextChanged)
+            // At most one value change per half second: a frame is drawn for
+            // every burst of output, and the selection changes on its own
+            // notification (`selectionChanged`).
+            scheduleAccessibilityValueChanged()
 #endif
         }
 

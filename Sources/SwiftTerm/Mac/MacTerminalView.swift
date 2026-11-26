@@ -291,6 +291,9 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     }
 
     var accessibility: AccessibilityService = AccessibilityService()
+    /// Whether a coalesced value-changed notification is already scheduled
+    /// (`scheduleAccessibilityValueChanged`).
+    var accessibilityValueChangePending = false
     var search: SearchService!
     private var findBar: TerminalFindBarView?
     private var findBarTerm: String = ""
@@ -592,6 +595,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     private func setup()
     {
         wantsLayer = true
+        _ = TerminalView.registerServicesTypes
         // AppKit sends stage-2 pressure events only when the view requests a
 	// deep-click pressure behavior before the pointer press starts.
         pressureConfiguration = NSPressureConfiguration(pressureBehavior: .primaryDeepClick)
@@ -3649,6 +3653,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             // the render snapshot too, so `needsDisplay` on its own repainted the
             // previous frame and the selection never showed up.
             self.invalidateTerminalContents()
+            NSAccessibility.post(element: self, notification: .selectedTextChanged)
         }
     }
     
