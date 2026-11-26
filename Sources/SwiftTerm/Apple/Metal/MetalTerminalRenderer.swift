@@ -1092,6 +1092,9 @@ final class MetalTerminalRenderer {
     /// Keyed by the identity of the buffer line each visible row shows.
     private var rowCache: [ObjectIdentifier: RowCacheEntry] = [:]
     private var cacheSignature: CacheSignature?
+    /// The y every pass of the frame being encoded adds, in drawable pixels:
+    /// the smooth scroll's part of a row (`TerminalSnapshot.scrollPixelOffset`).
+    private var frameShiftY: Float = 0
     private var atlasInvalidatedDuringBuild = false
     private let redrawState: MetalRedrawState
     private let cursorBlinkController: MetalCursorBlinkController
@@ -1475,6 +1478,16 @@ final class MetalTerminalRenderer {
         }
         bufferPool.beginFrame()
         let viewport = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
+        // A smooth scroll's part of a row moves the whole picture: every pass
+        // below adds this to its y, in whole pixels so glyphs stay sharp. The
+        // snapshot carries one overscan row on the side it uncovers, and the
+        // drawable's bounds cut what moves past the edge.
+        frameShiftY = -Float((snapshot.scrollPixelOffset * scale).rounded())
+        if frameShiftY != 0 {
+            encoder.setScissorRect(MTLScissorRect(x: 0, y: 0,
+                                                  width: drawable.texture.width,
+                                                  height: drawable.texture.height))
+        }
 
         if let frame = drawData.frame {
             drawFrameData(frame, encoder: encoder, viewport: viewport)
@@ -1550,6 +1563,8 @@ final class MetalTerminalRenderer {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var cursorShift = frameShiftY
+                encoder.setVertexBytes(&cursorShift, length: MemoryLayout<Float>.stride, index: 2)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorColorVertices.count)
             }
         }
@@ -1560,6 +1575,8 @@ final class MetalTerminalRenderer {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var cursorShift = frameShiftY
+                encoder.setVertexBytes(&cursorShift, length: MemoryLayout<Float>.stride, index: 2)
                 encoder.setFragmentTexture(grayscaleAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesGray.count)
@@ -1572,6 +1589,8 @@ final class MetalTerminalRenderer {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var cursorShift = frameShiftY
+                encoder.setVertexBytes(&cursorShift, length: MemoryLayout<Float>.stride, index: 2)
                 encoder.setFragmentTexture(colorAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesColor.count)
@@ -1905,8 +1924,9 @@ final class MetalTerminalRenderer {
             return nil
         }
         let firstRow = snapshot.firstRow
-        let lastRow = min(snapshot.linesCount - 1,
-                          firstRow + min(snapshot.rowCount, snapshot.rows.count) - 1)
+        // `rows` holds the visible rows plus, while a smooth scroll shows part
+        // of a row, the overscan row it uncovers.
+        let lastRow = min(snapshot.linesCount - 1, firstRow + snapshot.rows.count - 1)
         guard firstRow <= lastRow else { return nil }
         return (firstRow, lastRow, snapshot.yDisp)
     }
@@ -3801,8 +3821,8 @@ final class MetalTerminalRenderer {
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
-        var noShift: Float = 0
-        encoder.setVertexBytes(&noShift, length: MemoryLayout<Float>.stride, index: 2)
+        var frameShift = frameShiftY
+        encoder.setVertexBytes(&frameShift, length: MemoryLayout<Float>.stride, index: 2)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -3858,6 +3878,8 @@ final class MetalTerminalRenderer {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var frameShift = frameShiftY
+        encoder.setVertexBytes(&frameShift, length: MemoryLayout<Float>.stride, index: 2)
         for draw in draws {
             guard let buffer = makeBuffer(draw.vertices) else {
                 continue
@@ -3901,7 +3923,7 @@ final class MetalTerminalRenderer {
                 continue
             }
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-            var shiftY = row.shiftY
+            var shiftY = row.shiftY + frameShiftY
             encoder.setVertexBytes(&shiftY, length: MemoryLayout<Float>.stride, index: 2)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count * 6)
         }
@@ -3925,6 +3947,8 @@ final class MetalTerminalRenderer {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var frameShift = frameShiftY
+        encoder.setVertexBytes(&frameShift, length: MemoryLayout<Float>.stride, index: 2)
         for row in rows {
             for draw in row[keyPath: imageKey] {
                 encoder.setVertexBuffer(draw.buffer, offset: 0, index: 0)

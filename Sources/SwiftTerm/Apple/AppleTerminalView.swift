@@ -565,6 +565,9 @@ struct FrameViewState: Sendable {
     let minimumContrastRatio: CGFloat
     let bidiHostPolicy: BidiHostPolicy
     let glyphFallbackProvider: (any TerminalGlyphFallbackProvider)?
+    /// The smooth scroll's part of a row, in points (`TerminalSnapshot`
+    /// clamps it to the rows there are).
+    let scrollPixelOffset: CGFloat
 
     var effectiveForegroundColor: FrameColor { appearance.effectiveForegroundColor }
     var effectiveBackgroundColor: FrameColor { appearance.effectiveBackgroundColor }
@@ -607,6 +610,11 @@ struct FrameViewState: Sendable {
         minimumContrastRatio = view.minimumContrastRatio
         bidiHostPolicy = view.bidiHostPolicy
         glyphFallbackProvider = view.glyphFallbackProvider
+#if os(macOS)
+        scrollPixelOffset = view.smoothScrollPixelOffset
+#else
+        scrollPixelOffset = 0
+#endif
     }
 }
 
@@ -4503,6 +4511,10 @@ extension TerminalView {
     {
 #if os(iOS) || os(visionOS)
         resetManualScrollOffsetWithinRow()
+#else
+        if !smoothScrollWheelIsScrolling {
+            clearSmoothScrollOffset()
+        }
 #endif
         let didScroll = withTerminal { terminal in
             let displayBuffer = terminal.displayBuffer

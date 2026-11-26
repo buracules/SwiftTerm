@@ -2242,6 +2242,8 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     }
 
     public override func keyDown(with event: NSEvent) {
+        // Typing returns the picture to whole rows, so the prompt is never cut.
+        clearSmoothScrollOffset()
         kittyComposingKeyCode = nil
         if !event.isARepeat {
             kittyKeysWithReportedPress.remove(event.keyCode)
@@ -3757,7 +3759,12 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         }
         let displayBuffer = terminal.displayBuffer
         let col = Int (point.x / cellDimension.width)
-        let row = Int ((frame.height-point.y) / cellDimension.height)
+        // While a smooth scroll moves the picture, the row under the point is
+        // the one drawn there, which may be the overscan row above the screen.
+        let row = smoothScrollPixelOffset == 0
+            ? Int ((frame.height-point.y) / cellDimension.height)
+            : Int (((frame.height - point.y - smoothScrollPixelOffset)
+                    / cellDimension.height).rounded(.down))
         var colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
@@ -4426,6 +4433,65 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     private var scrollAccumulator = WheelDistanceAccumulator<WheelRoute>()
     private var wheelReportBudget = WheelReportBudget()
 
+    /// Smooth trackpad scrolling of the scrollback: the part of a row a
+    /// trackpad has moved, short of a whole row, moves the picture by that
+    /// many points instead of waiting in the bank. The scroll position, mouse
+    /// reports and wheel notches stay whole rows; only the picture moves.
+    /// Off, the wheel steps a whole row at a time.
+    public var smoothScrolling: Bool = false {
+        didSet {
+            if !smoothScrolling {
+                clearSmoothScrollOffset()
+            }
+        }
+    }
+
+    /// The picture's offset from the scroll position, in points: positive is
+    /// down, showing part of the row above; negative is up, showing part of
+    /// the row below. Always less than a row, and zero unless
+    /// `smoothScrolling` is on.
+    public internal(set) var smoothScrollPixelOffset: CGFloat = 0
+
+    /// True while the wheel itself scrolls, so `scrollTo` keeps the offset the
+    /// wheel is about to set.
+    var smoothScrollWheelIsScrolling = false
+
+    /// Called when `smoothScrollPixelOffset` changes, for a host that draws
+    /// over the rows and must move with them.
+    open func smoothScrollPixelOffsetDidChange(_ offset: CGFloat) {}
+
+    /// Puts the picture back on whole rows and empties the bank, for any
+    /// scroll that does not come from the trackpad and for typed input.
+    func clearSmoothScrollOffset() {
+        guard smoothScrollPixelOffset != 0 else { return }
+        scrollAccumulator.reset()
+        setSmoothScrollPixelOffset(0)
+    }
+
+    private func setSmoothScrollPixelOffset(_ offset: CGFloat) {
+        guard offset != smoothScrollPixelOffset else { return }
+        smoothScrollPixelOffset = offset
+        frameDriver?.markDirty()
+        smoothScrollPixelOffsetDidChange(offset)
+    }
+
+    /// The bank's remainder as the picture's offset, or zero, with the bank
+    /// emptied, when there is no row on that side to show.
+    private func applySmoothScrollRemainder() {
+        let remainder = scrollAccumulator.remainder
+        let hasRowOnThatSide = withTerminal { terminal -> Bool in
+            let buffer = terminal.displayBuffer
+            let lastDisp = max(0, buffer.lines.count - buffer.rows)
+            return remainder > 0 ? buffer.yDisp > 0 : buffer.yDisp < lastDisp
+        }
+        if remainder == 0 || !hasRowOnThatSide {
+            scrollAccumulator.reset()
+            setSmoothScrollPixelOffset(0)
+        } else {
+            setSmoothScrollPixelOffset(remainder)
+        }
+    }
+
     /// Why this wheel event belongs to SwiftTerm. Keeping bypass and alternate-scroll decisions
     /// distinct prevents a modifier intended for local handling from becoming cursor-key input.
     private enum WheelRoute: String {
@@ -4478,7 +4544,15 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         // held over the alternate buffer, which has no local scrollback.
         if scrollRoute == .none {
             scrollAccumulator.reset()
+            if smoothScrolling {
+                clearSmoothScrollOffset()
+            }
             return
+        }
+        let smoothPicture = smoothScrolling && scrollRoute == .localScrollback
+            && event.hasPreciseScrollingDeltas
+        if smoothScrolling && !smoothPicture {
+            clearSmoothScrollOffset()
         }
 
         // Translate the wheel/trackpad delta into a whole number of terminal
@@ -4510,6 +4584,9 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
                       event.isDirectionInvertedFromDevice.description,
                       scrollAccumulator.remainder,
                       scrollRoute.rawValue)
+            }
+            if smoothPicture {
+                applySmoothScrollRemainder()
             }
             return
         }
@@ -4573,10 +4650,15 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
                       event.isDirectionInvertedFromDevice.description,
                       scrollAccumulator.remainder, lines, scrollingUp ? "up" : "down")
             }
+            smoothScrollWheelIsScrolling = smoothPicture
             if scrollingUp {
                 scrollUp(lines: magnitude)
             } else {
                 scrollDown(lines: magnitude)
+            }
+            smoothScrollWheelIsScrolling = false
+            if smoothPicture {
+                applySmoothScrollRemainder()
             }
             showOverlayScroller()
         }

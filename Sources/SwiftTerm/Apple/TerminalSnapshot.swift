@@ -295,6 +295,11 @@ final class TerminalSnapshot {
     var cols = 0
     var rowCount = 0
     var linesCount = 0
+    /// The smooth scroll's part of a row, in points: positive moves the
+    /// picture down and uncovers the row above `yDisp`, negative moves it up
+    /// and uncovers the row below the screen. Zero, with no overscan row, when
+    /// there is no row on that side to show.
+    var scrollPixelOffset: CGFloat = 0
     var linesTop = 0
     var totalLinesTrimmed = 0
     var hasAnyImages = false
@@ -404,7 +409,14 @@ final class TerminalSnapshot {
         let bidiInputsChanged = previousBidiHostPolicy != viewState.bidiHostPolicy ||
             previousBidiFont != bidiFont
 
-        firstRow = buffer.yDisp
+        // A smooth scroll between rows shows part of one more row on the side
+        // it moves away from, so the snapshot carries that row too.
+        let requestedOffset = viewState.scrollPixelOffset
+        let lastDisp = max(0, buffer.lines.count - buffer.rows)
+        let overscanAbove = requestedOffset > 0 && buffer.yDisp > 0 ? 1 : 0
+        let overscanBelow = requestedOffset < 0 && buffer.yDisp < lastDisp ? 1 : 0
+        scrollPixelOffset = overscanAbove + overscanBelow > 0 ? requestedOffset : 0
+        firstRow = buffer.yDisp - overscanAbove
         yDisp = buffer.yDisp
         yBase = buffer.yBase
         x = buffer.x
@@ -422,7 +434,8 @@ final class TerminalSnapshot {
         style = newStyle
         ansiColors = terminal.ansiColors
 
-        let visibleCount = max(0, min(buffer.rows, buffer.lines.count - firstRow))
+        let visibleCount = max(0, min(buffer.rows + overscanAbove + overscanBelow,
+                                      buffer.lines.count - firstRow))
         while rows.count > visibleCount {
             rowPool.append(rows.removeLast())
         }
