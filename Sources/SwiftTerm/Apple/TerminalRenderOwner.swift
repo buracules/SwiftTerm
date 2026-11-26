@@ -549,7 +549,7 @@ final class TerminalRenderOwner: Sendable {
         -> (update: TerminalView.PreparedFrame?, busy: Bool)
     {
         var busy = false
-        let rendered = withRenderState { renderState in
+        let rendered: TerminalView.PreparedFrame? = withRenderState { renderState in
         guard let session = currentSession() else { return nil }
         let terminal = session.terminal
 #if canImport(MetalKit)
